@@ -1,0 +1,1418 @@
+;--------------------------------------------------------
+; Disassembled and annotated NABU NPC ROM
+; Greg Starks https://github.com/starkscon/nabu-z80
+; greg@inboxx.net
+; v0.1, November 26, 2022
+;--------------------------------------------------------
+; 
+;--------------------------------------------------------
+; Hardware Registers
+;--------------------------------------------------------
+R_CONTROL   EQU     $00 ;U6 74LS273
+R_PSG_DATA  EQU     $40 ;U25 AY-3-9010
+R_PSG_DATA  EQU     $40 ;U25 AY-3-9010
+R_PSG_ADDR_LATCH EQU $41 ;U25 AY-3-9010
+R_HCCA      EQU     $80 ;U14 TR1863P
+R_KBD_DATA  EQU     $90 ;U4 8251A
+R_KBD_CTRL_STATUS EQU $91 ;U4 8251A
+R_VDP_VRAM_DATA EQU $A0 ;U2 TMS9918
+R_VDP_CTRL_ADDR EQU $A1 ;U2 TMS9918
+R_PRN_WR    EQU     $B0 ;U11 74LS273
+; 
+;--------------------------------------------------------
+; PSG internal indexed registers
+;--------------------------------------------------------
+PSG_R7_ENABLE EQU   $07 
+PSG_R14_INT_MASK EQU $0e 
+PSG_R15_STATUS EQU  $0f 
+; 
+;--------------------------------------------------------
+; Variables/data locations in RAM
+;--------------------------------------------------------
+STACK_TOP   EQU     $FFEE 
+; 
+CTRL_BITS   EQU     $FFEE ;current control reg settings
+DEBUG_FLAG  EQU     $FFEF 
+RAM_FFF0    EQU     $FFF0 
+RAM_FFF6    EQU     $FFF6 
+CTRL_INDEX  EQU     $FFF7 
+RAM_FFF8    EQU     $FFF8 
+RAM_FFF9    EQU     $FFF9 
+RAM_FFFA    EQU     $FFFA 
+RAM_FFFB    EQU     $FFFB 
+RAM_FFFC    EQU     $FFFC 
+RAM_FFFE    EQU     $FFFE 
+RAM_FFFF    EQU     $FFFF 
+; 
+;--------------------------------------------------------
+; NOTE: These assume a 4k ROM!
+;--------------------------------------------------------
+RAM_1000    EQU     $1000 
+RAM_1001    EQU     $1001 
+RAM_1002    EQU     $1002 
+RAM_1003    EQU     $1003 
+RAM_1004    EQU     $1004 
+RAM_1006    EQU     $1006 
+RAM_1008    EQU     $1008 
+RAM_100A    EQU     $100A 
+RAM_100B    EQU     $100B 
+; 
+RAM_140B    EQU     $140B 
+RAM_140C    EQU     $140C 
+RAM_140D    EQU     $140D 
+RAM_140F    EQU     $140F 
+; 
+RAM_TEST_START_ADDR EQU $2000 
+; 
+; 
+; Control register: $00
+;   [7] NC
+;   [6] NC
+;   [5] 1=PRN STROBE
+;   [4] LED3 (Yellow/Pause) 0=ON
+;   [3] LED2 (Red/Alert) 0=ON
+;   [2] LED1 (Green) 0=ON
+;   [1] Video Switch 1=Internal
+;   [0] 0=ROM ENABLED
+; 
+            .ORG    $0000 
+            LD      a,$02 ;Internal Video, all LED's ON
+            LD      (CTRL_BITS),a ;$ffee
+            OUT     (R_CONTROL),a ; set video source to VDP
+            LD      sp,STACK_TOP ;$ffee
+            LD      hl,vdp_reg_init_data_69c ;$06c9    ; data source addr
+            LD      b,$08 ; # of bytes to write
+            LD      c,R_VDP_CTRL_ADDR 
+LABEL_11:            
+            OUTI     ; write 8 bytes from $069c to VDP
+            LD      a,b 
+            OR      $80 ; add bit 7 to indicate control reg vs. VRAM
+            OUT     (R_VDP_CTRL_ADDR),a 
+            AND     $7f ; remove bit 7
+            JR      nz,label_11 ;$0011
+; 
+; initialize to zero some RAM variables at top of memory, just above the stack
+            LD      hl,$ffef 
+            LD      de,$fff0 
+            LD      bc,$0009 
+            XOR     a 
+            LD      (hl),a 
+            LDIR     ; copy 9 bytes of $00 from $ffef to $fff0
+; 
+            CALL    psg_init_521 ;$0521     ;write $7f to Sound Chip R7
+            XOR     a ; clear reg a to zero
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $00 to Kbd Status
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $00 to Kbd Status
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $00 to Kbd Status
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $00 to Kbd Status
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $00 to Kbd Status
+            LD      a,$40 
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $40 to Kbd status/control = internal reset
+            LD      a,$4e 
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $4e to Kbd status/control = 8N1, 16x
+            LD      a,$04 
+            CALL    kbd_ctrl_out_52a ;$052a     ;write $04 to Kbd status/control = only receive enable
+            CALL    load_char_patterns_4e3 ;$04e3 ; loads char patterns, clears screen, displays logo
+            CALL    check_memtop_532 ;$0532 ;?? maybe warm reset detect?
+            JP      z,warm_reset_1ca ;$01ca  ;jumps if $fffe-$ffff contains $a55a
+; 
+; self tests?
+;------------------------------------------------------------------------
+;this section seems to poll the keyboard for some sort of response
+; 
+            LD      a,$3a ; toggle LEDs
+            OUT     (R_CONTROL),a 
+            LD      h,$0a ; counter for keypresses
+            LD      c,$20 ; value first written to IOA (enable only KBD interrupt)
+            LD      de,$e000 ; Keyboard response timout?
+            LD      b,$01 ; multiplier for DE ?
+LABEL_61:            
+            CALL    label_363 ;$0363 ;Decrement DE, Z set if DE>0
+            JR      z,label_6a ;$006a ;cound down DE
+            DJNZ    label_6a ;$006a ; count down B
+            JR      label_8c ;$008c ; timeout, move along
+LABEL_6A:            
+            CALL    label_64d ;$064d ;write C to IOA, read IOB into A
+            JR      z,label_61 ;$0061;if 0, no kbd INT has occurred, check again
+            IN      a,(R_KBD_DATA) ;read key
+            CP      "1" 
+            JR      z,label_82 ;$0082
+            CP      "=" 
+            JR      nz,label_61 ;$0061
+            BIT     0,h 
+            JR      z,label_61 ;$0061
+LABEL_7D:            
+            DEC     h 
+            JR      z,label_88 ;$0088
+            JR      label_61 ;$0061
+LABEL_82:            ; "1" pressed
+            BIT     0,h ;count number of times "1" was pressed
+            JR      nz,label_61 ;$0061
+            JR      label_7d ;$007d
+LABEL_88:            
+            LD      hl,DEBUG_FLAG ;    $ffef
+            INC     (hl) ; set flag that special code has been typed
+; 
+; 
+;----------------------------------------------
+; calculate & verivy ROM checksum
+;----------------------------------------------
+LABEL_8C:            
+            LD      a,(RAM_fff6) ;($fff6);  check variable (initial=0)
+            BIT     0,a 
+            JR      nz,label_98 ;$0098
+            CALL    label_4d1 ;$04d1    ;retrieve byte from $4dd data area
+            OUT     (R_CONTROL),a ;enable interrupts according to $4dd data byte
+LABEL_98:            
+            XOR     a 
+            LD      (RAM_ffff),a ;$ffff ;init variable to 0
+            LD      ix,data_ffd ;$0ffd  ;load last byte in ROM (before checksum)
+            LD      de,$ffff ;-1, used below to cause ADD to decrement
+            XOR     a 
+            LD      h,a 
+            LD      l,a 
+            LD      b,a 
+LABEL_A7:            
+            LD      c,(ix+0) ;C= current ROM byte value
+            ADD     hl,bc ;Add to checksum
+            ADD     ix,de ;Decrement ROM byte pointer
+            JR      c,label_a7 ;$00a7   ;step backwards from $ffd to $0
+            LD      a,(data_checksum_low_ffe) ;($0ffe)   ;expected checksum low byte
+            CP      l 
+            JR      nz,label_bb ;$00bb      ; error
+            LD      a,(data_checksum_low_fff) ;($0fff)   ;expected checksum high byte
+            SUB     h 
+            JR      z,label_be ;$00be
+LABEL_BB:            
+            CALL    label_4a6 ;$04a6    ;ROM error found
+LABEL_BE:            
+            CALL    label_46a ;$046a
+            XOR     a 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,$40 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            XOR     a 
+            LD      de,$0001 
+            LD      ix,$c000 ;TODO
+LABEL_D0:            
+            OUT     (R_VDP_VRAM_DATA),a 
+            INC     a 
+            ADD     ix,de 
+            JR      nc,label_d0 ;$00d0
+            LD      ix,$c000 ;TODO
+            XOR     a 
+            LD      c,a 
+            LD      b,a 
+            LD      h,a 
+            LD      l,a 
+LABEL_E0:            
+            LD      a,l 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,h 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            IN      a,(R_VDP_VRAM_DATA) 
+            CP      c 
+            JR      nz,label_103 ;$0103
+            LD      a,l 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,h 
+            OR      $40 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,c 
+            CPL      
+            OUT     (R_VDP_VRAM_DATA),a 
+            LD      a,l 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,h 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            IN      a,(R_VDP_VRAM_DATA) 
+            CPL      
+            CP      c 
+            JR      z,label_106 ;$0106
+LABEL_103:           
+            CALL    label_4a6 ;    $04a6
+LABEL_106:           
+            INC     c 
+            INC     hl 
+            LD      de,$0001 
+            ADD     ix,de 
+            JR      nc,label_e0 ;$00e0
+            CALL    load_char_patterns_4e3 ;$04e3
+            CALL    label_53e ;$053e
+            CALL    label_46a ;$046a
+; 
+;RAM TEST
+;load test values 00-255 in 256 byfrom $2000 to $FEFF
+            XOR     a 
+            LD      ix,RAM_TEST_START_ADDR ;$2000    ;start test at 8k boundary
+            LD      hl,$2100 ;stop when this overflows at $FF00
+            LD      de,$0001 
+MEM_LOAD_LOOP_123:   
+            LD      (ix+0),a ;store into addr
+            INC     a 
+            INC     ix 
+            ADD     hl,de 
+            JR      nc,mem_load_loop_123 ;$0123
+; test the memory
+            XOR     a 
+            LD      c,a 
+            LD      hl,$2100 
+            LD      ix,RAM_TEST_START_ADDR ;$2000
+            LD      b,a 
+MEM_TEST_LOOP_136:   
+            LD      a,(ix+0) 
+            CP      c ; check initial value
+            JR      nz,mem_error_147 ;$0147
+            CPL      
+            LD      (ix+0),a ;write complement
+            LD      a,(ix+0) ;read it back
+            CPL      
+            CP      c ;check complemented value
+            JR      z,mem_location_ok_14a ;$014a
+MEM_ERROR_147:       
+            CALL    label_4a6 ;    $04a6     ;display err
+MEM_LOCATION_OK_14A:  
+            INC     ix 
+            INC     c 
+            ADD     hl,de 
+            JR      nc,mem_test_loop_136 ;$0136
+            CALL    label_46a ;$046a
+; test PSG registers
+            LD      b,$10 
+            LD      c,$00 
+LABEL_157:           
+            LD      a,b 
+            DEC     a 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,c 
+            OUT     (R_PSG_DATA),a 
+            DJNZ    label_157 ;$0157
+            LD      c,$00 
+LABEL_162:           
+            LD      b,$ff 
+LABEL_164:           
+            LD      a,c 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,b 
+            OUT     (R_PSG_DATA),a 
+            IN      a,(R_PSG_DATA) 
+            CALL    label_17e ;$017e
+            CALL    nz,label_4a6 ;$04a6
+            SRL     b 
+            JR      c,label_164 ;$0164
+            INC     c 
+            LD      a,$0e 
+            CP      c 
+            JR      nz,label_162 ;$0162
+            JR      label_199 ;$0199
+LABEL_17E:           
+            LD      hl,data_18b ;$018b
+            LD      e,c 
+            LD      d,$00 
+            ADD     hl,de 
+            AND     (hl) 
+            LD      e,a 
+            LD      a,b 
+            AND     (hl) 
+            CP      e 
+            RET      
+; 
+; Unknown data
+DATA_18B:            
+            DB      $FF,$0F,$FF,$0F,$FF,$0F,$1F,$FF,$1F,$1F,$1F,$FF,$FF,$0F 
+; 
+;-------------------------------------------------------------------
+;-------------------------------------------------------------------
+LABEL_199:           
+            CALL    label_46a ;$046a
+            CALL    psg_init_521 ;$0521
+            LD      de,$0000 
+            LD      b,$05 
+LABEL_1A4:           
+            LD      c,$20 
+            CALL    label_64d ;$064d
+            JR      z,label_1c1 ;$01c1
+            IN      a,(R_KBD_DATA) 
+            CP      $95 
+            JR      nc,label_1c1 ;$01c1
+            CP      $91 
+            JR      c,label_1c1 ;$01c1
+            CP      $94 
+            JR      z,label_1bc ;$01bc
+LABEL_1B9:           
+            CALL    label_4a6 ;$04a6
+LABEL_1BC:           
+            CALL    label_46a ;$046a
+            JR      warm_reset_1ca ;$01ca
+LABEL_1C1:           
+            DEC     de 
+            LD      a,d 
+            OR      e 
+            JR      nz,label_1a4 ;$01a4
+            DJNZ    label_1a4 ;$01a4
+            JR      label_1b9 ;$01b9
+; 
+WARM_RESET_1CA:      ; best guess
+            IN      a,(R_HCCA) 
+            CALL    label_386 ;$0386
+            JR      z,label_1e3 ;$01e3
+            CALL    label_4a6 ;$04a6
+            JR      label_206 ;$0206
+LABEL_1D6:           
+            LD      a,$05 
+            LD      (CTRL_INDEX),a ;$fff7
+            LD      (RAM_fffe),a ;$fffe
+            CALL    label_4a6 ;$04a6
+            JR      warm_reset_1ca ;$01ca
+LABEL_1E3:           
+            LD      c,$82 
+            CALL    label_379 ;$0379
+            JR      nz,label_1d6 ;$01d6
+            LD      a,$01 
+            OUT     (R_HCCA),a 
+            CALL    label_67a ;$067a
+            IN      a,(R_HCCA) 
+            JR      nz,label_1d6 ;$01d6
+            LD      (RAM_fff8),a ;$fff8
+            LD      c,$10 
+            CALL    label_36c ;$036c
+            JR      nz,label_1d6 ;$01d6
+            LD      c,$e1 
+            CALL    label_36c ;$036c
+            JR      nz,label_1d6 ;$01d6
+LABEL_206:           
+            CALL    check_memtop_532 ;$0532
+            CALL    nz,label_46a ;$046a
+            LD      a,(DEBUG_FLAG) ;$ffef
+            OR      a 
+            JP      nz,label_8c ;$008c
+            LD      a,(RAM_fff6) ;fff6
+            BIT     0,a 
+            JR      nz,label_221 ;$0221
+            LD      a,$02 
+            LD      (CTRL_BITS),a ;ffee TODO... seems strange use of stack
+            OUT     (R_CONTROL),a 
+LABEL_221:           
+            LD      hl,RAM_fff8 ;$fff8
+            BIT     7,(hl) 
+            JR      z,label_29f ;$029f
+            LD      hl,data_msg1_6d1 ;$06d1  PLEASE TYPE IN CHANNEL CODE
+            CALL    display_msg_56b ;$056b
+LABEL_22E:           
+            LD      hl,RAM_fff9 ;$fff9
+            LD      de,$02c7 ;Not an address
+            CALL    label_57c ;$057c
+            LD      hl,RAM_fff9 ;$fff9
+            XOR     a 
+            LD      c,a 
+            LD      b,$04 
+LABEL_23E:           
+            LD      a,(hl) 
+            BIT     0,b 
+            JR      z,label_24c ;$024c
+            SLA     a 
+            BIT     4,a 
+            JR      z,label_24c ;$024c
+            RES     4,a 
+            INC     a 
+LABEL_24C:           
+            ADD     a,c 
+            LD      c,a 
+            INC     hl 
+            DJNZ    label_23e ;$023e
+            AND     $0f 
+            CP      (hl) 
+            JR      z,label_266 ;$0266
+            LD      hl,data_msg10_7ac ;$07ac  RE-TYPE CHANNEL CODE
+            CALL    display_msg_56b ;$056b
+            LD      c,$90 
+            LD      de,$e000 ; count? th size of RAM above the ROM?
+            CALL    label_6a2 ;$06a2
+            JR      label_22e ;$022e
+LABEL_266:           
+            LD      hl,RAM_fff9 ;$fff9
+            LD      b,$04 
+            LD      de,$0000 
+LABEL_26E:           
+            LD      a,(hl) 
+            SLA     e 
+            RL      d 
+            SLA     e 
+            RL      d 
+            SLA     e 
+            RL      d 
+            SLA     e 
+            RL      d 
+            ADD     a,e 
+            LD      e,a 
+            INC     hl 
+            DJNZ    label_26e ;$026e
+            PUSH    de 
+            LD      c,$85 
+            CALL    label_379 ;$0379
+            JP      nz,label_1d6 ;$01d6
+            POP     de 
+            LD      a,d 
+            OUT     (R_HCCA),a 
+            LD      c,$40 
+            CALL    label_64d ;$064d
+            LD      a,e 
+            OUT     (R_HCCA),a 
+            CALL    label_5ee ;$05ee
+            JP      nz,label_1d6 ;$01d6
+LABEL_29F:           
+            LD      c,$81 
+            CALL    label_379 ;$0379
+            JP      nz,label_1d6 ;$01d6
+            LD      a,$8f 
+            OUT     (R_HCCA),a 
+            LD      c,$40 
+            CALL    label_64d ;$064d
+            LD      a,$05 
+            OUT     (R_HCCA),a 
+            CALL    label_5ee ;$05ee
+            JP      nz,label_1d6 ;$01d6
+            LD      a,$05 
+            LD      (RAM_fff8),a ;$fff8
+            LD      hl,$0000 
+            LD      de,$0000 
+            LD      bc,$1000 
+            LDIR     
+            LD      a,(CTRL_BITS) ;$ffee
+            SET     0,a 
+            OUT     (R_CONTROL),a 
+            LD      hl,data_msg3_72c ;$072c  PLEASE WAIT
+            CALL    display_msg_56b ;$056b
+; Load OS into RAM??
+LABEL_2D7:           
+            XOR     a 
+            LD      (RAM_1000),a ;$1000
+            LD      (RAM_1001),a ;$1001
+            LD      (RAM_1003),a ;$1003
+            INC     a 
+            LD      (RAM_1002),a ;$1002
+            LD      bc,RAM_100b ;$100b
+            LD      (RAM_1004),bc ;$1004
+            LD      bc,RAM_140d ;$140d
+            LD      (RAM_1008),bc ;$1008
+            XOR     a 
+            LD      (RAM_140b),a ;$140b
+            LD      (RAM_140c),a ;$140c
+            XOR     a 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            OUT     (R_PSG_DATA),a 
+            CALL    label_68a ;$068a
+LABEL_302:           
+            CALL    label_3b0 ;$03b0
+            JP      nz,label_1d6 ;$01d6
+            XOR     a 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,(RAM_1003) ;$1003
+            SLA     a 
+            SLA     a 
+            CPL      
+            OUT     (R_PSG_DATA),a 
+            LD      hl,(RAM_1004) ;$1004
+            LD      bc,$000b 
+            ADD     hl,bc 
+            LD      a,(hl) 
+            LD      (RAM_100a),a ;$100a
+            LD      hl,(RAM_1006) ;$1006
+            LD      bc,CTRL_BITS ;$ffee TODO - why stack?
+            ADD     hl,bc 
+            PUSH    hl 
+            POP     bc 
+            LD      hl,(RAM_140b) ;$140b
+            ADD     hl,bc 
+            LD      (RAM_140b),hl ;$140b
+            LD      hl,(RAM_1004) ;$1004
+            LD      de,$0010 
+            ADD     hl,de 
+            LD      de,(RAM_1008) ;$1008
+            LDIR     
+            LD      (RAM_1008),de ;$1008
+            LD      a,(RAM_100a) ;$100a
+            BIT     4,a 
+            JR      nz,label_34e ;$034e
+            LD      hl,RAM_1003 ;$1003
+            INC     (hl) 
+            JR      label_302 ;$0302
+LABEL_34E:           
+            LD      a,$a5 
+            LD      (RAM_fffe),a ;$fffe
+            LD      a,$5a 
+            LD      (RAM_ffff),a ;$ffff
+            LD      a,$07 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,$7f 
+            OUT     (R_PSG_DATA),a 
+            JP      RAM_140f ;$140f           ; launch downloaded software??
+; 
+LABEL_363:           ;check if DE has reached zero
+            DEC     de 
+            LD      a,d 
+            OR      e 
+            JR      z,label_36a ;$036a
+            XOR     a 
+            DEC     a 
+LABEL_36A:           
+            INC     a 
+            RET      ; if DE=0, Z is set, else Z not set
+; 
+;-------------------------------------------------------------------
+;-------------------------------------------------------------------
+LABEL_36C:           
+            PUSH    bc 
+            CALL    label_67a ;$067a
+            POP     bc 
+            RET     nz 
+            IN      a,(R_HCCA) 
+            SUB     c 
+            RET     z 
+            LD      a,$02 
+            RET      
+; 
+; 
+;-------------------------------------------------------------------
+;-------------------------------------------------------------------
+LABEL_379:           
+            LD      a,c 
+            OUT     (R_HCCA),a 
+            LD      c,$10 
+            CALL    label_36c ;$036c
+            RET     nz 
+            LD      c,$06 
+            JR      label_36c ;$036c
+LABEL_386:           
+            LD      b,$04 
+LABEL_388:           
+            LD      a,$83 
+            PUSH    af 
+            OUT     (R_HCCA),a 
+LABEL_38D:           
+            POP     af 
+            LD      c,$10 
+            LD      hl,$03a4 ;Popped into AF
+LABEL_393:           
+            PUSH    hl 
+            CALL    label_36c ;$036c
+            CP      $02 
+            JR      z,label_38d ;$038d
+            CP      $00 
+            RET     z 
+            POP     af 
+            DJNZ    label_388 ;$0388
+            XOR     a 
+            INC     a 
+            RET      
+; 
+; 
+;-------------------------------------------------------------------
+;-------------------------------------------------------------------
+            LD      c,$06 
+            LD      hl,$03ab ;Popped into AF
+            JR      label_393 ;$0393
+            LD      c,$e4 
+            POP     hl 
+            JR      label_393 ;$0393
+LABEL_3B0:           
+            EXX      
+            XOR     a 
+            DEC     a 
+            LD      d,a 
+            LD      e,a 
+            EXX      
+            LD      c,$84 
+            CALL    label_379 ;$0379
+            RET     nz 
+            LD      b,$04 
+            LD      hl,RAM_1003 ;$1003
+LABEL_3C1:           
+            LD      c,$40 
+            CALL    label_64d ;$064d
+            JR      z,label_3c1 ;$03c1
+            LD      a,(hl) 
+            OUT     (R_HCCA),a 
+            DEC     l 
+            DJNZ    label_3c1 ;$03c1
+            LD      c,$e4 
+            CALL    label_36c ;$036c
+            RET     nz 
+            LD      b,$18 
+            LD      de,$0001 
+            LD      hl,$0000 
+LABEL_3DC:           
+            ADD     hl,de 
+            JR      nc,label_3eb ;$03eb
+            DJNZ    label_3eb ;$03eb
+            LD      hl,data_msg2_6f5 ;$06f5  SEE "IF SOMETHING GOES WRONG" IN OWNERS GUIDE
+            CALL    display_msg_56b ;$056b
+            POP     bc 
+            JP      label_2d7 ;$02d7
+LABEL_3EB:           
+            LD      c,$80 
+            CALL    label_64d ;$064d
+            JR      z,label_3dc ;$03dc
+            IN      a,(R_HCCA) 
+            SUB     $91 
+            RET     nz 
+            LD      a,$10 
+            OUT     (R_HCCA),a 
+LABEL_3FB:           
+            LD      c,$40 
+            CALL    label_64d ;$064d
+            JR      z,label_3fb ;$03fb
+            LD      c,$80 
+            CALL    label_64d ;$064d
+            LD      hl,(RAM_1004) ;$1004
+            LD      bc,$0000 
+            RES     0,e 
+            LD      a,$06 
+            OUT     (R_HCCA),a 
+LABEL_413:           
+            PUSH    de 
+            LD      de,RAM_ffff ;$ffff
+LABEL_417:           
+            LD      a,$0f 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            IN      a,(R_PSG_DATA) 
+            BIT     0,a 
+            JR      nz,label_428 ;$0428
+            CALL    label_363 ;$0363
+            JR      nz,label_465 ;$0465
+            JR      label_417 ;$0417
+LABEL_428:           
+            POP     de 
+            IN      a,(R_HCCA) 
+            CP      $10 
+            JR      nz,label_441 ;$0441
+            BIT     0,e 
+            JR      z,label_43d ;$043d
+            RES     0,e 
+            LD      (hl),a 
+            CALL    label_65d ;$065d
+            INC     hl 
+            INC     bc 
+            JR      label_413 ;$0413
+LABEL_43D:           
+            SET     0,e 
+            JR      label_413 ;$0413
+LABEL_441:           
+            BIT     0,e 
+            JR      nz,label_44d ;$044d
+            LD      (hl),a 
+            CALL    label_65d ;$065d
+            INC     hl 
+            INC     bc 
+            JR      label_413 ;$0413
+LABEL_44D:           
+            LD      (RAM_1006),bc ;$1006
+            CP      $e1 
+            JP      nz,label_3b0 ;$03b0
+            EXX      
+            LD      a,e 
+            CP      $0f 
+            JP      nz,label_3b0 ;$03b0
+            LD      a,d 
+            CP      $1d 
+            JP      nz,label_3b0 ;$03b0
+            XOR     a 
+            RET      
+; 
+; 
+;-------------------------------------------------------------------
+; update variables and track test sequence
+;-------------------------------------------------------------------
+LABEL_465:           
+            POP     de 
+            POP     de 
+            JP      label_1d6 ;$01d6
+LABEL_46A:           
+            LD      c,$50 
+            LD      hl,RAM_fff6 ;$fff6  ;get variable
+            BIT     1,(hl) ;check bit [1]
+            JR      z,label_475 ;$0475
+            LD      c,$90 
+LABEL_475:           
+            LD      de,$cc00 
+            CALL    label_6a2 ;$06a2
+            RES     1,(hl) 
+            LD      hl,$8000 ;TODO address?
+            LD      de,$0001 
+LABEL_483:           
+            ADD     hl,de 
+            JR      nc,label_483 ;$0483
+            LD      a,(CTRL_INDEX) ;$fff7
+            LD      c,a 
+            SUB     $05 
+            JR      z,label_490 ;$0490
+            ADD     a,$06 
+LABEL_490:           
+            LD      (CTRL_INDEX),a ;$fff7
+            LD      a,(RAM_fff6) ;$fff6
+            BIT     0,a 
+            JP      nz,label_5f3 ;$05f3
+            CALL    label_4d1 ;$04d1
+            OUT     (R_CONTROL),a 
+            LD      (CTRL_BITS),a ;$ffee
+            JP      label_5f3 ;$05f3
+LABEL_4A6:           
+            PUSH    af 
+            PUSH    de 
+            PUSH    hl 
+            LD      a,(RAM_fff6) ;$fff6
+            BIT     0,a ;check ?? flag
+            JR      nz,label_4ba ;$04ba
+            CALL    label_4d1 ;$04d1        ;move to next control reg value
+            OR      $10 ; force bit to enable VDP internal
+            OUT     (R_CONTROL),a 
+            LD      (CTRL_BITS),a ;$ffee  ;update current ctrl bits variable
+LABEL_4BA:           
+            LD      a,$03 
+            LD      (RAM_fff6),a ;$fff6     ;store to variable?
+            LD      hl,RAM_fff0 ;$fff0
+            LD      d,$00 
+            LD      a,(CTRL_INDEX) ;$fff7     ; into CTRL_SEQUENCE, and offset to $fff0
+            LD      e,a 
+            ADD     hl,de 
+            INC     (hl) 
+            JR      nz,label_4cd ;$04cd
+            DEC     (hl) 
+LABEL_4CD:           
+            POP     hl 
+            POP     de 
+            POP     af 
+            RET      
+LABEL_4D1:           
+            LD      hl,DATA_CTRL_SEQUENCE_4DD ;$04dd
+            LD      a,(CTRL_INDEX) ;$fff7     ;variable index into sequence
+            LD      e,a 
+            LD      d,$00 
+            ADD     hl,de 
+            LD      a,(hl) 
+            RET      
+; 
+; Sequence of Control Register values, retrieved by LABEL_4D1
+DATA_CTRL_SEQUENCE_4DD:  
+            DB      $2A,$0A,$2A,$0A,$22,$02 
+; 
+; 
+;-------------------------------------------------------------------
+; Splash screen
+;-------------------------------------------------------------------
+; 
+;--------------------------------------------
+; Load character patterns in to pattern table
+; in VRAM, including custom characters needed
+; to display logo
+;--------------------------------------------
+LOAD_CHAR_PATTERNS_4E3:  
+            XOR     a 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,$41 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      c,R_VDP_VRAM_DATA ;$a0
+            LD      d,$04 ;5 blocks of 256 bytes for logo
+            LD      hl,data_char_patterns_83c ;$083c
+LOAD_LOOP_4F1:       
+            LD      b,$ff ;load 256 bytes at a time
+            OTIR     
+            DEC     d 
+            JR      nz,load_loop_4f1 ;$04f1
+;--------------------------------------------
+; Clear the screen
+;--------------------------------------------
+            XOR     a 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,$48 ; base of VRAM
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,$20 ; ASCII space
+            LD      hl,$fc40 ; counts up to FFFF, writes 960 "space" chars
+            LD      de,$0001 
+LABEL_507:           
+            OUT     (R_VDP_VRAM_DATA),a 
+            ADD     hl,de 
+            JR      nc,label_507 ;$0507  ; loop 960 times to clear screen
+;--------------------------------------------
+; Display the logo
+;--------------------------------------------
+            LD      b,$07 ; logo row height
+            LD      hl,data_logo_7d3 ;$07d3    ; NABU logo data
+            LD      de,$000f ; width of source data 3x prefix + 12x display chars
+LABEL_514:           
+            PUSH    bc 
+            PUSH    hl 
+            PUSH    de 
+            CALL    display_msg_56b ;$056b
+            POP     de 
+            POP     hl 
+            POP     bc 
+            ADD     hl,de ; move to next row's source data
+            DJNZ    label_514 ;$0514  ; decrements register b until zero
+            RET      
+; 
+; 
+; 
+PSG_INIT_521:        
+            LD      a,$07 ; R7, Enable Register
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,$7f ; [7] IOB=IN, [6] IOA=OUT, [5:3] Noise off [2:0] Tone off
+            OUT     (R_PSG_DATA),a 
+            RET      
+; 
+; 
+; 
+KBD_CTRL_OUT_52A:    
+            OUT     (R_KBD_CTRL_STATUS),a 
+            NOP      
+            NOP      
+            NOP      
+            NOP      
+            NOP      
+            RET      
+; 
+CHECK_MEMTOP_532:    ;guessing... looks for $a55a in the last 2 bytes of RAM
+            LD      hl,RAM_fffe ;$fffe
+            LD      a,(hl) 
+            SUB     $a5 
+            RET     nz 
+            INC     hl 
+            LD      a,(hl) 
+            SUB     $5a 
+            RET      
+; 
+LABEL_53E:           
+            LD      c,$05 
+            PUSH    bc 
+LABEL_541:           
+            CALL    label_5f3 ;$05f3
+            POP     bc 
+            DEC     c 
+            JP      m,label_54c ;$054c
+            PUSH    bc 
+            JR      label_541 ;$0541
+LABEL_54C:           
+            LD      a,(DEBUG_FLAG) ;$ffef
+            OR      a 
+            RET     z 
+            LD      hl,(data_7d0) ;($07d0)    ;value= $02, $5A
+            LD      (RAM_fff9),hl ;$fff9
+            LD      a,(data_7d2) ;($07d2)    ;value = $03
+            LD      (RAM_fffb),a ;$fffb
+            LD      de,(data_ffc) ;($0ffc)     ;value = $30
+            LD      (RAM_fffc),de ;$fffc
+            LD      hl,RAM_fff9 ;$fff9
+            JP      display_msg_56b ;$056b
+; 
+;---------------------------------------------------
+; Write string to screen at char offset
+;---------------------------------------------------
+DISPLAY_MSG_56B:     
+            LD      b,(hl) ; 1st msg prefix byte: msg length
+            INC     hl 
+            LD      a,(hl) ; 2nd msg prefix byte: low byte of char offset
+            OUT     (R_VDP_CTRL_ADDR),a 
+            INC     hl 
+            LD      a,(hl) ; 3rd msg prefix byte: high byte of char offset
+            ADD     a,$48 ; VRAM base addr
+            OUT     (R_VDP_CTRL_ADDR),a 
+            INC     hl 
+            LD      c,R_VDP_VRAM_DATA ;$a0
+            OTIR     ; outputs until b=0
+            RET      
+; 
+LABEL_57C:           
+            LD      b,$05 
+LABEL_57E:           
+            IN      a,(R_KBD_CTRL_STATUS) 
+            BIT     1,a 
+            JR      z,label_57e ;$057e
+            IN      a,(R_KBD_DATA) 
+            PUSH    af 
+            SUB     $30 
+            JR      c,label_5c2 ;$05c2  ;jmp if < "0"
+            CP      $0a 
+            JR      c,label_5a3 ;$05a3  ;jmp if > ":"  ??
+            SUB     $07 
+            CP      $0a 
+            JR      c,label_5c2 ;$05c2
+            CP      $10 
+            JR      c,label_5a3 ;$05a3
+            SUB     $20 
+            CP      $0a 
+            JR      c,label_5c2 ;$05c2
+            CP      $10 
+            JR      nc,label_5c2 ;$05c2
+LABEL_5A3:           
+            LD      c,a 
+            LD      a,b 
+            OR      a 
+            JR      nz,label_5ab ;$05ab
+            POP     af 
+            JR      label_57e ;$057e
+LABEL_5AB:           
+            LD      a,e 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,d 
+            OR      $48 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            POP     af 
+            CP      $5b 
+            JR      c,label_5ba ;$05ba
+            SUB     $20 
+LABEL_5BA:           
+            OUT     (R_VDP_VRAM_DATA),a 
+            LD      (hl),c 
+            INC     hl 
+            INC     de 
+            DEC     b 
+            JR      label_57e ;$057e
+LABEL_5C2:           
+            POP     af 
+            CP      $0d 
+            JR      z,label_5cb ;$05cb
+            CP      $e7 
+            JR      nz,label_5d0 ;$05d0
+LABEL_5CB:           
+            LD      a,b 
+            OR      a 
+            JR      nz,label_57e ;$057e
+            RET      
+; 
+LABEL_5D0:           
+            CP      $7f 
+            JR      z,label_5d8 ;$05d8
+            CP      $e1 
+            JR      nz,label_57e ;$057e
+LABEL_5D8:           
+            LD      a,b 
+            CP      $05 
+            JR      z,label_57e ;$057e
+            DEC     de 
+            DEC     hl 
+            INC     b 
+            LD      a,e 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,d 
+            OR      $48 
+            OUT     (R_VDP_CTRL_ADDR),a 
+            LD      a,$20 
+            OUT     (R_VDP_VRAM_DATA),a 
+            JR      label_57e ;$057e
+LABEL_5EE:           
+            LD      c,$e4 
+            JP      label_36c ;$036c
+LABEL_5F3:           
+            LD      a,(DEBUG_FLAG) ;$ffef
+            OR      a 
+            JR      z,label_61c ;$061c
+            LD      a,$02 
+            LD      (RAM_fff9),a ;$fff9
+            LD      de,$0028 
+            LD      b,c 
+            INC     b 
+            LD      hl,$012b 
+LABEL_606:           
+            ADD     hl,de 
+            DJNZ    label_606 ;$0606
+            LD      (RAM_fffa),hl ;$fffa
+            LD      hl,RAM_fff0 ;$fff0
+            ADD     hl,bc 
+            LD      de,RAM_fffc ;$fffc
+            CALL    label_633 ;$0633
+            LD      hl,RAM_fff9 ;$fff9
+            JP      display_msg_56b ;$056b
+LABEL_61C:           
+            LD      hl,RAM_fff0 ;$fff0
+            LD      b,$00 
+            ADD     hl,bc 
+            LD      a,(hl) 
+            OR      a 
+            RET     z 
+            LD      hl,data_msg4_73a ;$073a  ROM FAILURE
+            LD      de,$0013 
+            INC     c 
+LABEL_62C:           
+            DEC     c 
+            JP      z,display_msg_56b ;$056b
+            ADD     hl,de 
+            JR      label_62c ;$062c
+LABEL_633:           
+            LD      a,(hl) 
+            SRL     a ;shift to the next error message, each is 16 bytes long
+            SRL     a 
+            SRL     a 
+            SRL     a 
+            CALL    label_643 ;$0643
+            INC     de 
+            LD      a,(hl) 
+            AND     $0f 
+LABEL_643:           
+            ADD     a,$30 
+            CP      $3a 
+            JR      c,label_64b ;$064b
+            ADD     a,$07 
+LABEL_64B:           
+            LD      (de),a 
+            RET      
+; 
+LABEL_64D:           
+            LD      a,$0e 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,c 
+            OUT     (R_PSG_DATA),a 
+            LD      a,$0f 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            IN      a,(R_PSG_DATA) 
+            BIT     0,a 
+            RET      
+; 
+LABEL_65D:           
+            PUSH    af 
+            EXX      
+            XOR     d 
+            LD      c,a 
+            LD      b,$00 
+            SLA     c 
+            RL      b 
+            LD      d,e 
+            LD      iy,$0b74 ;assuming a count and not an address
+            ADD     iy,bc 
+            LD      a,(iy+0) 
+            LD      e,a 
+            LD      a,(iy+1) 
+            XOR     d 
+            LD      d,a 
+            EXX      
+            POP     af 
+            RET      
+; 
+LABEL_67A:           
+            LD      de,RAM_ffff ;$ffff
+LABEL_67D:           
+            CALL    label_363 ;$0363
+            RET     nz 
+            LD      c,$80 
+            CALL    label_64d ;$064d
+            JR      z,label_67d ;$067d
+            XOR     a 
+            RET      
+; 
+LABEL_68A:           
+            LD      a,$07 ;select PSG R7
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,$7e 
+            OUT     (R_PSG_DATA),a 
+            LD      a,$08 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,$06 
+            OUT     (R_PSG_DATA),a 
+            LD      a,$01 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            DEC     a 
+            OUT     (R_PSG_DATA),a 
+            RET      
+; 
+LABEL_6A2:           
+            PUSH    af 
+            PUSH    hl 
+            PUSH    bc 
+            PUSH    de 
+            CALL    label_68a ;$068a
+            XOR     a 
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,c 
+            OUT     (R_PSG_DATA),a 
+            LD      hl,$0001 
+            LD      b,$04 
+            EX      de,hl 
+LABEL_6B5:           
+            ADD     hl,de 
+            JR      nc,label_6b5 ;$06b5
+            POP     hl 
+            PUSH    hl 
+            DJNZ    label_6b5 ;$06b5
+            LD      a,PSG_R7_ENABLE ;$07
+            OUT     (R_PSG_ADDR_LATCH),a 
+            LD      a,$7f 
+            OUT     (R_PSG_DATA),a 
+            POP     de 
+            POP     bc 
+            POP     hl 
+            POP     af 
+            RET      
+; 
+; 
+;-------------------------------------------------------
+; DATA
+            .ORG    $06c9 
+VDP_REG_INIT_DATA_69C:  
+            DB      $F5 ; VDP R7 init: FG Color=White, BG Color=Light Blue (orig=$F5)
+            DB      $00 ; VDP R6 init: sprite pattern table at $0
+            DB      $00 ; VDP R5 init: sprite attr table at $0
+            DB      $00 ; VDP R4 init: pattern table at $0
+            DB      $00 ; VDP R3 init: color table at $0
+            DB      $02 ; VPD R2 init: name table at $800
+            DB      $D0 ; VPD R1 init: 16k, blank, disable INT, Multicolor, sprites 16x16/2x
+            DB      $00 ; VDP R0 init: b7=disable external input, b6=mode bit 3
+; 
+DATA_MSG1_6D1:       
+            DB      $21,$AB,$02,"PLEASE TYPE IN CHANNEL CODE      " 
+; 
+DATA_MSG2_6F5:       
+            DB      $34,$21,$03,"SEE ",$22,"IF SOMETHING GOES WRONG",$22," IN        OWNERS GUIDE" 
+; 
+DATA_MSG3_72C:       
+            DB      $0B,$21,$03,"PLEASE WAIT" 
+; 
+DATA_MSG4_73A:       
+            DB      $10,$49,$01,"ROM FAILURE     " 
+; 
+DATA_MSG5_74D:       
+            DB      $10,$71,$01,"VIDEO FAILURE   " 
+; 
+DATA_MSG6_760:       
+            DB      $10,$99,$01,"RAM FAILURE     " 
+; 
+DATA_MSG7_773:       
+            DB      $10,$C1,$01,"SOUND FAILURE   " 
+; 
+DATA_MSG8_786:       
+            DB      $10,$E9,$01,"KEYBOARD FAILURE" 
+; 
+DATA_MSG9_799:       
+            DB      $10,$11,$02,"ADAPTOR FAILURE " 
+; 
+DATA_MSG10_7AC:      
+            DB      $21,$AB,$02,"RE-TYPE CHANNEL CODE             " 
+; 
+DATA_7D0:            
+            DB      $02,$5A 
+; 
+DATA_7D2:            
+            DB      $03 
+; 
+DATA_LOGO_7D3:       ; 1st row of NABU logo
+            DB      $0C,$0D,$00,"[",$5C,$5C,$5C,$5C,$5C,$5C,$5C,$5C,$5C,$5C,"]" 
+            DB      $0C,$35,$00,"^^^^^^^^^^^^" ; 2nd row of logo
+            DB      $0C,$5D,$00,"_`abcdefghij" ; 3rd row of logo
+            DB      $0C,$85,$00,"klmnopqrstuv" ; 4th row of logo
+            DB      $0C,$AD,$00,"wxyz{|}~",$7F,$80,$81,$82 ; 5th row of logo
+            DB      $0C,$D5,$00,$83,$83,$83,$83,$83,$83,$83,$83,$83,$83,$83,$83 ; 6th row of logo
+            DB      $0C,$FD,$00,$84,$85,$85,$85,$85,$85,$85,$85,$85,$85,$85,$86 ; 7th row of logo
+; 
+DATA_CHAR_PATTERNS_83C:  
+; ASCII character definition
+; written to VRAM addr $000
+; presumably the display function
+; is adding the 32d offset
+;------- 1st 256 bytes loaded
+            DB      $00,$00,$00,$00,$00,$00,$00,$00 ; space  20h  32d
+            DB      $10,$10,$10,$10,$10,$00,$10,$00 ; !
+            DB      $28,$28,$00,$00,$00,$00,$00,$00 ; "
+            DB      $28,$28,$7C,$28,$7C,$28,$28,$00 ; #
+            DB      $38,$54,$50,$38,$14,$54,$38,$00 ; $
+            DB      $60,$64,$08,$10,$20,$6C,$0C,$00 ; %
+            DB      $10,$28,$28,$30,$50,$4C,$7C,$00 ; &
+            DB      $30,$30,$10,$60,$00,$00,$00,$00 ; '
+            DB      $10,$20,$40,$40,$40,$20,$10,$00 ; (
+            DB      $40,$20,$10,$10,$10,$20,$40,$00 ; )
+            DB      $00,$54,$38,$7C,$38,$54,$10,$00 ; *
+            DB      $00,$00,$10,$10,$7C,$10,$10,$00 ; +
+            DB      $00,$00,$00,$00,$30,$30,$10,$60 ; ,
+            DB      $00,$00,$00,$00,$38,$00,$00,$00 ; -
+            DB      $00,$00,$00,$00,$00,$18,$18,$00 ; .
+            DB      $04,$04,$08,$18,$30,$20,$40,$00 ; /
+            DB      $38,$44,$4C,$54,$64,$44,$38,$00 ; 0
+            DB      $10,$30,$10,$10,$10,$10,$38,$00 ; 1
+            DB      $30,$48,$48,$18,$30,$20,$78,$00 ; 2
+            DB      $30,$48,$08,$10,$08,$48,$30,$00 ; 3
+            DB      $10,$30,$30,$50,$50,$78,$10,$00 ; 4
+            DB      $78,$40,$50,$68,$08,$48,$30,$00 ; 5
+            DB      $30,$28,$40,$70,$68,$48,$30,$00 ; 6
+            DB      $78,$48,$08,$10,$30,$20,$20,$00 ; 7
+            DB      $30,$48,$48,$30,$48,$48,$30,$00 ; 8
+            DB      $30,$48,$48,$38,$08,$50,$30,$00 ; 9
+            DB      $00,$00,$30,$30,$00,$30,$30,$00 ; :
+            DB      $00,$00,$30,$30,$00,$30,$10,$40 ; ;
+            DB      $08,$10,$20,$40,$20,$10,$08,$00 ; <
+            DB      $00,$00,$00,$78,$00,$78,$00,$00 ; =
+            DB      $40,$20,$10,$08,$10,$20,$40,$00 ; >
+            DB      $30,$48,$48,$10,$20,$20,$00,$20 ; ?
+;------ 2nd 256 bytes
+            DB      $40,$38,$04,$38,$08,$38,$48,$34 ; @
+            DB      $10,$28,$44,$44,$7C,$44,$44,$00 ; A
+            DB      $78,$44,$44,$78,$44,$44,$78,$00 ; B
+            DB      $38,$44,$40,$40,$40,$44,$38,$00 ; C
+            DB      $70,$48,$44,$44,$44,$48,$70,$00 ; D
+            DB      $7C,$40,$40,$70,$40,$40,$7C,$00 ; E
+            DB      $7C,$40,$40,$70,$40,$40,$40,$00 ; F
+            DB      $38,$44,$44,$40,$5C,$44,$3C,$00 ; G
+            DB      $44,$44,$44,$7C,$44,$44,$44,$00 ; H
+            DB      $38,$10,$10,$10,$10,$10,$38,$00 ; I
+            DB      $1C,$08,$08,$08,$48,$48,$30,$00 ; J
+            DB      $48,$48,$50,$70,$50,$48,$4C,$00 ; K
+            DB      $40,$40,$40,$40,$40,$40,$7C,$00 ; L
+            DB      $6C,$54,$54,$44,$44,$44,$44,$00 ; M
+            DB      $44,$64,$64,$54,$54,$4C,$4C,$00 ; N
+            DB      $38,$44,$44,$44,$44,$44,$38,$00 ; O
+            DB      $78,$44,$44,$78,$40,$40,$40,$00 ; P
+            DB      $38,$44,$44,$44,$54,$48,$34,$00 ; Q
+            DB      $78,$48,$48,$78,$50,$48,$4C,$00 ; R
+            DB      $38,$44,$40,$38,$04,$44,$38,$00 ; S
+            DB      $7C,$10,$10,$10,$10,$10,$10,$00 ; T
+            DB      $44,$44,$44,$44,$44,$44,$38,$00 ; U
+            DB      $44,$44,$44,$28,$28,$28,$10,$00 ; V
+            DB      $44,$44,$44,$44,$54,$54,$28,$00 ; W
+            DB      $44,$44,$28,$10,$28,$44,$44,$00 ; X
+            DB      $44,$44,$44,$38,$10,$10,$10,$00 ; Y
+            DB      $7C,$0C,$18,$10,$20,$60,$7C,$00 ; Z
+; 
+; 
+; NABU logo
+; 7 rows tall, 12 characters wide
+            DB      $00,$00,$00,$3C,$7C,$00,$00,$FC ; [ 5Bh     ; top left corner
+            DB      $FC,$00,$00,$FC,$FC,$00,$00,$FC ; \ 5Ch     ; top middle 10
+            DB      $00,$00,$00,$F0,$F8,$00,$00,$FC ; ] 5Dh     ; top right corner
+            DB      $FC,$FC,$00,$FC,$FC,$FC,$FC,$00 ; ^ 5Eh     ; 2nd row
+            DB      $FC,$FC,$F0,$F0,$F0,$F0,$F0,$F0 ; _ 5Fh     ; 1st row of NABU
+;------ 3rd 256 bytes loaded
+            DB      $FC,$FC,$0C,$0C,$0C,$04,$04,$04 ; `
+            DB      $FC,$FC,$E0,$E0,$E0,$E0,$E0,$E0 ; a
+            DB      $FC,$FC,$7C,$7C,$7C,$7C,$7C,$7C ; b
+            DB      $FC,$FC,$80,$80,$80,$18,$18,$18 ; c
+            DB      $FC,$FC,$7C,$7C,$7C,$3C,$3C,$3C ; d
+            DB      $FC,$FC,$80,$80,$80,$80,$80,$80 ; e
+            DB      $FC,$FC,$00,$00,$00,$60,$70,$70 ; f
+            DB      $FC,$FC,$78,$38,$18,$08,$08,$08 ; g
+            DB      $FC,$FC,$04,$04,$04,$04,$04,$04 ; h
+            DB      $FC,$FC,$C0,$C0,$C0,$C0,$C0,$C0 ; i
+            DB      $FC,$FC,$3C,$3C,$3C,$3C,$3C,$3C ; j
+            DB      $F0,$F0,$F0,$F0,$F0,$F0,$F0,$F0 ; k 6Bh     ;2nd row of NABU
+            DB      $00,$00,$20,$30,$30,$38,$38,$3C ; l
+            DB      $E0,$E0,$E0,$60,$60,$60,$20,$20 ; m
+            DB      $78,$78,$78,$70,$70,$70,$60,$60 ; n
+            DB      $18,$3C,$3C,$3C,$3C,$00,$00,$00 ; o
+            DB      $1C,$1C,$1C,$0C,$0C,$0C,$04,$04 ; p
+            DB      $80,$80,$80,$80,$80,$80,$80,$80 ; q
+            DB      $60,$60,$00,$04,$00,$60,$60,$70 ; r
+            DB      $18,$38,$78,$F8,$78,$38,$18,$08 ; s
+            DB      $04,$04,$04,$04,$04,$04,$04,$04 ; t
+            DB      $C0,$C0,$C0,$C0,$C0,$C0,$C0,$C0 ; u
+            DB      $3C,$3C,$3C,$3C,$3C,$3C,$3C,$3C ; v
+            DB      $F0,$F0,$F0,$F0,$F0,$FC,$FC,$00 ; w 77h     ; 3rd row of NABU
+            DB      $3C,$3C,$3C,$3C,$3C,$FC,$FC,$00 ; x
+            DB      $00,$00,$80,$80,$80,$FC,$FC,$00 ; y
+            DB      $60,$40,$40,$40,$40,$FC,$FC,$00 ; z
+            DB      $00,$18,$18,$3C,$3C,$FC,$FC,$00 ; {
+            DB      $04,$00,$00,$00,$00,$FC,$FC,$00 ; |
+            DB      $80,$80,$80,$80,$80,$FC,$FC,$00 ; }
+            DB      $70,$60,$00,$00,$00,$FC,$FC,$00 ; ~
+            DB      $08,$08,$1C,$3C,$7C,$FC,$FC,$00 ; (DEL) 7Fh 127d
+;------ 4th 256 bytes loaded
+            DB      $04,$00,$00,$80,$C0,$FC,$FC,$00 ; 
+            DB      $C0,$80,$00,$00,$04,$FC,$FC,$00 ; 
+            DB      $3C,$3C,$7C,$FC,$FC,$FC,$FC,$00 ; 
+            DB      $FC,$FC,$FC,$FC,$00,$FC,$FC,$FC ; 83h       ; 6th row
+            DB      $00,$00,$7C,$3C,$00,$00,$00,$00 ; 84h       ; bottom left corner
+            DB      $00,$00,$FC,$FC,$00,$00,$FC,$00 ; 85h       ; bottom middle 10
+            DB      $00,$00,$F8,$F0,$00,$00,$00,$00 ; 86h       ; bottom right corner
+; 
+; 
+; Unknown data
+; appear to be in pairs with some
+; type of patterns per nibble
+; memory test patterns??
+            DB      $00,$00,$21,$10,$42,$20,$63,$30 
+            DB      $84,$40,$A5,$50,$C6,$60,$E7,$70 
+            DB      $08,$81,$29,$91,$4A,$A1,$6B,$B1 
+            DB      $8C,$C1,$AD,$D1,$CE,$E1,$EF,$F1 
+            DB      $31,$12,$10,$02,$73,$32,$52,$22 
+            DB      $B5,$52,$94,$42,$F7,$72,$D6,$62 
+            DB      $39,$93,$18,$83,$7B,$B3,$5A,$A3 
+            DB      $BD,$D3,$9C,$C3,$FF,$F3,$DE,$E3 
+            DB      $62,$24,$43,$34,$20,$04,$01,$14 
+            DB      $E6,$64,$C7,$74,$A4,$44,$85,$54 
+            DB      $6A,$A5,$4B,$B5,$28,$85,$09,$95 
+            DB      $EE,$E5,$CF,$F5,$AC,$C5,$8D,$D5 
+            DB      $53,$36,$72,$26,$11,$16,$30,$06 
+            DB      $D7,$76,$F6,$66,$95,$56,$B4,$46 
+            DB      $5B,$B7,$7A,$A7,$19,$97,$38,$87 
+            DB      $DF,$F7,$FE,$E7,$9D,$D7,$BC,$C7 
+            DB      $C4,$48,$E5,$58,$86,$68,$A7,$78 
+            DB      $40,$08,$61,$18,$02,$28,$23,$38 
+            DB      $CC,$C9,$ED,$D9,$8E,$E9,$AF,$F9 
+            DB      $48,$89,$69,$99,$0A,$A9,$2B,$B9 
+            DB      $F5,$5A,$D4,$4A,$B7,$7A,$96,$6A 
+            DB      $71,$1A,$50,$0A,$33,$3A,$12,$2A 
+            DB      $FD,$DB,$DC,$CB,$BF,$FB,$9E,$EB 
+            DB      $79,$9B,$58,$8B,$3B,$BB,$1A,$AB 
+            DB      $A6,$6C,$87,$7C,$E4,$4C,$C5,$5C 
+;------ 5th 256 bytes loaded
+            DB      $22,$2C,$03,$3C,$60,$0C,$41,$1C 
+            DB      $AE,$ED,$8F,$FD,$EC,$CD,$CD,$DD 
+            DB      $2A,$AD,$0B,$BD,$68,$8D,$49,$9D 
+            DB      $97,$7E,$B6,$6E,$D5,$5E,$F4,$4E 
+            DB      $13,$3E,$32,$2E,$51,$1E,$70,$0E 
+            DB      $9F,$FF,$BE,$EF,$DD,$DF,$FC,$CF 
+            DB      $1B,$BF,$3A,$AF,$59,$9F,$78,$8F 
+            DB      $88,$91,$A9,$81,$CA,$B1,$EB,$A1 
+            DB      $0C,$D1,$2D,$C1,$4E,$F1,$6F,$E1 
+            DB      $80,$10,$A1,$00,$C2,$30,$E3,$20 
+            DB      $04,$50,$25,$40,$46,$70,$67,$60 
+            DB      $B9,$83,$98,$93,$FB,$A3,$DA,$B3 
+            DB      $3D,$C3,$1C,$D3,$7F,$E3,$5E,$F3 
+            DB      $B1,$02,$90,$12,$F3,$22,$D2,$32 
+            DB      $35,$42,$14,$52,$77,$62,$56,$72 
+            DB      $EA,$B5,$CB,$A5,$A8,$95,$89,$85 
+            DB      $6E,$F5,$4F,$E5,$2C,$D5,$0D,$C5 
+            DB      $E2,$34,$C3,$24,$A0,$14,$81,$04 
+            DB      $66,$74,$47,$64,$24,$54,$05,$44 
+            DB      $DB,$A7,$FA,$B7,$99,$87,$B8,$97 
+            DB      $5F,$E7,$7E,$F7,$1D,$C7,$3C,$D7 
+            DB      $D3,$26,$F2,$36,$91,$06,$B0,$16 
+            DB      $57,$66,$76,$76,$15,$46,$34,$56 
+            DB      $4C,$D9,$6D,$C9,$0E,$F9,$2F,$E9 
+            DB      $C8,$99,$E9,$89,$8A,$B9,$AB,$A9 
+            DB      $44,$58,$65,$48,$06,$78,$27,$68 
+            DB      $C0,$18,$E1,$08,$82,$38,$A3,$28 
+            DB      $7D,$CB,$5C,$DB,$3F,$EB,$1E,$FB 
+            DB      $F9,$8B,$D8,$9B,$BB,$AB,$9A,$BB 
+            DB      $75,$4A,$54,$5A,$37,$6A,$16,$7A 
+            DB      $F1,$0A,$D0,$1A,$B3,$2A,$92,$3A 
+            DB      $2E,$FD,$0F,$ED,$6C,$DD,$4D,$CD 
+;------ end of pattern load loop
+; 
+;Unknown data
+            DB      $AA,$BD,$8B,$AD,$E8,$9D,$C9,$8D 
+            DB      $26,$7C,$07,$6C,$64,$5C,$45,$4C 
+            DB      $A2,$3C,$83,$2C,$E0,$1C,$C1,$0C 
+            DB      $1F,$EF,$3E,$FF,$5D,$CF,$7C,$DF 
+            DB      $9B,$AF,$BA,$BF,$D9,$8F,$F8,$9F 
+            DB      $17,$6E,$36,$7E,$55,$4E,$74,$5E 
+            DB      $93,$2E,$B2,$3E,$D1,$0E,$F0,$1E 
+            DB      $00,$00,$00,$00,$00,$00,$00,$00 
+            DB      $00,$00,$00,$00 
+; 
+; ROM checksum?, versions?, config data?
+            .ORG    $0FFA 
+; 
+DATA_FFA:            
+            DB      $0B 
+; 
+DATA_FFB:            
+            DB      $14 
+; 
+DATA_FFC:            
+            DB      $30 
+; 
+DATA_FFD:            
+            DB      $36 
+; 
+DATA_CHECKSUM_LOW_FFE:  
+            DB      $CF 
+; 
+DATA_CHECKSUM_LOW_FFF:  
+            DB      $3B 
+; 
+
